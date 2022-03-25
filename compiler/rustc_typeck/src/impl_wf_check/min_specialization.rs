@@ -77,6 +77,7 @@ use rustc_middle::ty::trait_def::TraitSpecializationKind;
 use rustc_middle::ty::{self, TyCtxt, TypeFoldable};
 use rustc_span::Span;
 use rustc_trait_selection::traits::{self, translate_substs, wf};
+use tracing::instrument;
 
 pub(super) fn check_min_specialization(tcx: TyCtxt<'_>, impl_def_id: DefId, span: Span) {
     if let Some(node) = parent_specialization_node(tcx, impl_def_id) {
@@ -102,6 +103,7 @@ fn parent_specialization_node(tcx: TyCtxt<'_>, impl1_def_id: DefId) -> Option<No
 }
 
 /// Check that `impl1` is a sound specialization
+#[instrument(level = "debug", skip(infcx))]
 fn check_always_applicable(
     infcx: &InferCtxt<'_, '_>,
     impl1_def_id: DefId,
@@ -112,10 +114,8 @@ fn check_always_applicable(
         get_impl_substs(infcx, impl1_def_id, impl2_node, span)
     {
         let impl2_def_id = impl2_node.def_id();
-        debug!(
-            "check_always_applicable(\nimpl1_def_id={:?},\nimpl2_def_id={:?},\nimpl2_substs={:?}\n)",
-            impl1_def_id, impl2_def_id, impl2_substs
-        );
+        debug!("impl2_def_id={impl2_def_id:?}");
+        debug!("impl2_substs={impl2_substs:?}");
 
         let tcx = infcx.tcx;
 
@@ -278,10 +278,10 @@ fn check_static_lifetimes<'tcx>(
 /// * global (not reference any parameters)
 /// * `T: Tr` predicate where `Tr` is an always-applicable trait
 /// * on the base `impl impl2`
-///     * Currently this check is done using syntactic equality, which is
-///       conservative but generally sufficient.
+///     * This check is done using the `trait_predicates_eq` function below.
 /// * a well-formed predicate of a type argument of the trait being implemented,
 ///   including the `Self`-type.
+#[instrument(level = "debug", skip(infcx))]
 fn check_predicates<'tcx>(
     infcx: &InferCtxt<'_, 'tcx>,
     impl1_def_id: LocalDefId,
@@ -313,10 +313,8 @@ fn check_predicates<'tcx>(
         .map(|obligation| obligation.predicate)
         .collect()
     };
-    debug!(
-        "check_always_applicable(\nimpl1_predicates={:?},\nimpl2_predicates={:?}\n)",
-        impl1_predicates, impl2_predicates,
-    );
+    debug!("impl1_predicates={impl1_predicates:?}");
+    debug!("impl2_predicates={impl2_predicates:?}");
 
     // Since impls of always applicable traits don't get to assume anything, we
     // can also assume their supertraits apply.
@@ -362,25 +360,52 @@ fn check_predicates<'tcx>(
     );
 
     for predicate in impl1_predicates {
-        if !impl2_predicates.contains(&predicate) {
+        if !impl2_predicates.iter().any(|pred2| trait_predicates_eq(predicate, *pred2)) {
             check_specialization_on(tcx, predicate, span)
         }
     }
 }
 
+/// Checks whether two predicates are the same for the purposes of specialization.
+///
+/// This is slightly more complicated than simple syntactic equivalence, since
+/// we want to equate `T: Tr` with `T: ~const Tr` so this can work:
+///
+/// #[rustc_specialization_trait]
+/// trait Specialize { }
+///
+/// impl<T: ~const Bound> const Tr for T { }
+/// impl<T: Bound + Specialize> Tr for T { }
+fn trait_predicates_eq<'tcx>(
+    predicate1: ty::Predicate<'tcx>,
+    predicate2: ty::Predicate<'tcx>,
+) -> bool {
+    let predicate_kind_without_constness = |kind: ty::PredicateKind<'tcx>| match kind {
+        ty::PredicateKind::Trait(ty::TraitPredicate { trait_ref, constness: _, polarity }) => {
+            ty::PredicateKind::Trait(ty::TraitPredicate {
+                trait_ref,
+                constness: ty::BoundConstness::NotConst,
+                polarity,
+            })
+        }
+        _ => kind,
+    };
+
+    let pred1_kind_not_const = predicate1.kind().map_bound(predicate_kind_without_constness);
+    let pred2_kind_not_const = predicate2.kind().map_bound(predicate_kind_without_constness);
+
+    pred1_kind_not_const == pred2_kind_not_const
+}
+
+#[instrument(level = "debug", skip(tcx))]
 fn check_specialization_on<'tcx>(tcx: TyCtxt<'tcx>, predicate: ty::Predicate<'tcx>, span: Span) {
-    debug!("can_specialize_on(predicate = {:?})", predicate);
     match predicate.kind().skip_binder() {
         // Global predicates are either always true or always false, so we
         // are fine to specialize on.
         _ if predicate.is_global() => (),
         // We allow specializing on explicitly marked traits with no associated
         // items.
-        ty::PredicateKind::Trait(ty::TraitPredicate {
-            trait_ref,
-            constness: ty::BoundConstness::NotConst,
-            polarity: _,
-        }) => {
+        ty::PredicateKind::Trait(ty::TraitPredicate { trait_ref, constness: _, polarity: _ }) => {
             if !matches!(
                 trait_predicate_kind(tcx, predicate),
                 Some(TraitSpecializationKind::Marker)
@@ -409,13 +434,10 @@ fn trait_predicate_kind<'tcx>(
     predicate: ty::Predicate<'tcx>,
 ) -> Option<TraitSpecializationKind> {
     match predicate.kind().skip_binder() {
-        ty::PredicateKind::Trait(ty::TraitPredicate {
-            trait_ref,
-            constness: ty::BoundConstness::NotConst,
-            polarity: _,
-        }) => Some(tcx.trait_def(trait_ref.def_id).specialization_kind),
-        ty::PredicateKind::Trait(_)
-        | ty::PredicateKind::RegionOutlives(_)
+        ty::PredicateKind::Trait(ty::TraitPredicate { trait_ref, constness: _, polarity: _ }) => {
+            Some(tcx.trait_def(trait_ref.def_id).specialization_kind)
+        }
+        ty::PredicateKind::RegionOutlives(_)
         | ty::PredicateKind::TypeOutlives(_)
         | ty::PredicateKind::Projection(_)
         | ty::PredicateKind::WellFormed(_)
