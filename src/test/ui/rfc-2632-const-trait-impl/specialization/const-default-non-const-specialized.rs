@@ -30,7 +30,7 @@ impl Value for FortyTwo {
     }
 }
 
-const ZERO: u32 = get_value::<FortyTwo>();
+const ZERO: u32 = get_value::<()>();
 
 const FORTY_TWO: u32 = get_value::<FortyTwo>();
 

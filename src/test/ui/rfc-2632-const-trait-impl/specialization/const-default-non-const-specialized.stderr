@@ -6,7 +6,7 @@ LL |     T::value()
    |     |
    |     calling non-const function `<FortyTwo as Value>::value`
    |     inside `get_value::<FortyTwo>` at $DIR/const-default-non-const-specialized.rs:13:5
-   |     inside `FORTY_TWO` at $DIR/const-default-non-const-specialized.rs:34:24
+   |     inside `FORTY_TWO` at $DIR/const-default-non-const-specialized.rs:35:24
 ...
 LL | const FORTY_TWO: u32 = get_value::<FortyTwo>();
    | -----------------------------------------------
