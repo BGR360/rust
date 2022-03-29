@@ -76,6 +76,7 @@
 #![feature(never_type)]
 #![feature(unwrap_infallible)]
 #![feature(result_into_ok_or_err)]
+#![feature(result_tracing)]
 #![feature(portable_simd)]
 #![feature(ptr_metadata)]
 #![feature(once_cell)]

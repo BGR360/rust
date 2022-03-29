@@ -492,7 +492,7 @@
 use crate::iter::{self, FromIterator, FusedIterator, TrustedLen};
 use crate::marker::Destruct;
 use crate::ops::{self, ControlFlow, Deref, DerefMut};
-use crate::{convert, fmt, hint};
+use crate::{convert, fmt, hint, panic};
 
 /// `Result` is a type that represents either success ([`Ok`]) or failure ([`Err`]).
 ///
@@ -2101,9 +2101,31 @@ impl<T, E, F: ~const From<E>> const ops::FromResidual<Result<convert::Infallible
 {
     #[inline]
     #[track_caller]
-    fn from_residual(residual: Result<convert::Infallible, E>) -> Self {
+    default fn from_residual(residual: Result<convert::Infallible, E>) -> Self {
         match residual {
             Err(e) => Err(From::from(e)),
+        }
+    }
+}
+
+// FIXME(bgr360): how to properly add this change that depends on compiler
+// functionality that's not yet in the beta?
+#[cfg(not(bootstrap))]
+#[unstable(feature = "result_tracing", issue = "none")]
+#[rustc_const_unstable(feature = "const_convert", issue = "88674")]
+impl<T, E, F> const ops::FromResidual<Result<convert::Infallible, E>> for Result<T, F>
+where
+    F: ~const From<E> + ~const Trace,
+{
+    #[inline]
+    #[track_caller]
+    fn from_residual(residual: Result<convert::Infallible, E>) -> Self {
+        match residual {
+            Err(e) => {
+                let mut traced = F::from(e);
+                traced.trace(panic::Location::caller());
+                Err(traced)
+            }
         }
     }
 }
@@ -2111,4 +2133,44 @@ impl<T, E, F: ~const From<E>> const ops::FromResidual<Result<convert::Infallible
 #[unstable(feature = "try_trait_v2_residual", issue = "91285")]
 impl<T, E> ops::Residual<T> for Result<convert::Infallible, E> {
     type TryType = Result<T, E>;
+}
+
+/// A trait that enables try-tracing for [`Err`] variants of [`Result`].
+///
+/// Implementing this trait on your error type will notify you every time the
+/// try operator (`?`) is invoked on your result, providing you with the source
+/// code location of the `?` invocation.
+///
+/// # Example Usage
+///
+/// Given the following code:
+///
+/// ```
+/// #![feature(result_tracing)]
+/// #![feature(min_specialization)]
+///
+/// struct MyError;
+///
+/// impl std::result::Trace for MyError {
+///     fn trace(&mut self, location: &'static std::panic::Location<'static>) {
+///         println!("`?` invoked at {}", location);
+///     }
+/// }
+///
+/// # fn foo() -> Result<(), MyError> {
+/// Err(MyError)?
+/// # }
+/// # foo().ok();
+/// ```
+///
+/// Output like the following would be produced:
+///
+/// ```txt
+/// `?` invoked at main.rs:LL:CC
+/// ```
+#[unstable(feature = "result_tracing", issue = "none")]
+#[rustc_specialization_trait]
+pub trait Trace {
+    /// Called during `?` with the source code location of the `?` invocation.
+    fn trace(&mut self, location: &'static panic::Location<'static>);
 }
