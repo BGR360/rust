@@ -425,3 +425,74 @@ fn result_try_trait_v2_branch() {
     assert_eq!(Ok::<NonZeroU32, ()>(one).branch(), Continue(one));
     assert_eq!(Err::<NonZeroU32, ()>(()).branch(), Break(Err(())));
 }
+
+mod result_tracing {
+    use core::panic;
+    use core::result::Trace;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct TracedError(pub u32);
+
+    impl From<u32> for TracedError {
+        fn from(i: u32) -> Self {
+            Self(i)
+        }
+    }
+
+    impl Trace for TracedError {
+        // Increment by 1 on every `?` invocation.
+        fn trace(&mut self, _location: &'static panic::Location<'static>) {
+            self.0 += 1;
+        }
+    }
+
+    #[test]
+    fn try_operator_calls_trace() {
+        fn foo() -> Result<(), TracedError> {
+            Err(TracedError(0))
+        }
+
+        fn bar() -> Result<(), TracedError> {
+            Ok(foo()?)
+        }
+
+        fn baz() -> Result<(), TracedError> {
+            Ok(bar()?)
+        }
+
+        let result = baz();
+        assert_eq!(result, Err(TracedError(2)));
+    }
+
+    #[test]
+    fn try_operator_converts_into_traced_type_and_calls_trace() {
+        fn foo() -> Result<(), TracedError> {
+            Err(0)?
+        }
+
+        let result = foo();
+        assert_eq!(result, Err(TracedError(1)));
+    }
+
+    #[test]
+    fn try_operator_provides_correct_location() {
+        #[derive(Default)]
+        struct TheLocation(pub Option<&'static panic::Location<'static>>);
+
+        impl Trace for TheLocation {
+            fn trace(&mut self, location: &'static panic::Location<'static>) {
+                self.0 = Some(location);
+            }
+        }
+
+        let two_lines_before = panic::Location::caller();
+        fn foo() -> Result<(), TheLocation> {
+            Err(TheLocation::default())?
+        }
+
+        let result = foo();
+        let location = result.unwrap_err().0.unwrap();
+        assert_eq!(location.file(), two_lines_before.file());
+        assert_eq!(location.line(), two_lines_before.line() + 2);
+    }
+}
